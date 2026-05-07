@@ -2,7 +2,7 @@ import { Elysia } from 'elysia'
 import { staticPlugin } from '../src'
 
 import { expect, it, describe } from 'vitest'
-import { join, sep } from 'path'
+import { sep } from 'path'
 
 import { req, takodachi } from './utils'
 
@@ -105,6 +105,19 @@ describe('Static Plugin', () => {
         const res = await app.handle(req('/public/takodachi.png'))
         expect(res.status).toBe(404)
     })
+    it('ignore string pattern (when alwaysStatic is true)', async () => {
+        const app = new Elysia().use(
+            staticPlugin({
+                ignorePatterns: [`public${sep}takodachi.png`],
+                alwaysStatic: true
+            })
+        )
+
+        await app.modules
+
+        const res = await app.handle(req('/public/takodachi.png'))
+        expect(res.status).toBe(404)
+    })
 
     it('ignore regex pattern', async () => {
         const app = new Elysia().use(
@@ -139,7 +152,7 @@ describe('Static Plugin', () => {
         const app = new Elysia().use(
             staticPlugin({
                 alwaysStatic: true,
-                assets: join(expect.getState().testPath!, '../../public')
+                assets: 'public/'
             })
         )
 
@@ -381,10 +394,111 @@ describe('Static Plugin', () => {
 
         for (const path of notFoundPaths) {
             const res = await app.handle(req(path))
-
             expect(res.status).toBe(404)
         }
     })
+
+    it.each([
+        { bunFullstack: true, alwaysStatic: true },
+        { bunFullstack: false, alwaysStatic: true },
+        { bunFullstack: true, alwaysStatic: false },
+        { bunFullstack: false, alwaysStatic: false }
+    ])(
+        'should work on all possible index.html paths',
+        async ({ bunFullstack, alwaysStatic }) => {
+            const app = new Elysia().use(
+                staticPlugin({
+                    assets: 'public',
+                    prefix: 'public',
+                    indexHTML: true,
+                    bunFullstack,
+                    alwaysStatic
+                })
+            )
+
+            await app.modules
+            const htmlPaths = [
+                '/public/html',
+                '/public/html/',
+                '/public/html/index.html',
+                '/public/html/index.html/'
+            ]
+
+            for (const path of htmlPaths) {
+                // console.log(path)
+                const res = await app.handle(req(path))
+                await (await res.blob()).text() // make sure content is readable and does not lock server-side Response object
+
+                expect(res.status).toBe(200)
+            }
+        }
+    )
+    it.each([
+        { bunFullstack: true, alwaysStatic: true },
+        { bunFullstack: false, alwaysStatic: true },
+        { bunFullstack: true, alwaysStatic: false },
+        { bunFullstack: false, alwaysStatic: false }
+    ])(
+        'should 404 on root path when indexHTML is false',
+        async ({ bunFullstack, alwaysStatic }) => {
+            const app = new Elysia().use(
+                staticPlugin({
+                    assets: 'public',
+                    prefix: 'public',
+                    indexHTML: false,
+                    bunFullstack,
+                    alwaysStatic
+                })
+            )
+
+            await app.modules
+            const htmlPaths = [
+                '/public/html/index.html',
+                '/public/html/index.html/'
+            ]
+
+            for (const path of htmlPaths) {
+                // console.log(path)
+                const res = await app.handle(req(path))
+                await (await res.blob()).text() // make sure content is readable and does not lock server-side Response object
+
+                expect(res.status).toBe(200)
+            }
+            for (const invalidPath of ['/public/html', '/public/html/']) {
+                // console.log(path)
+                const res = await app.handle(req(invalidPath))
+
+                expect(res.status).toBe(404)
+            }
+        }
+    )
+    it.each([
+        { bunFullstack: true, alwaysStatic: true },
+        { bunFullstack: false, alwaysStatic: true },
+        { bunFullstack: true, alwaysStatic: false },
+        { bunFullstack: false, alwaysStatic: false }
+    ])(
+        'should work on all possible index.html paths (index.html is in root asset dir)',
+        async ({ bunFullstack, alwaysStatic }) => {
+            const app = new Elysia().use(
+                staticPlugin({
+                    assets: 'public/html',
+                    prefix: '',
+                    indexHTML: true,
+                    bunFullstack,
+                    alwaysStatic
+                })
+            )
+
+            await app.modules
+            const htmlPaths = ['', '/', '/index.html', '/index.html/']
+
+            for (const path of htmlPaths) {
+                const res = await app.handle(req(path))
+                expect(res.status).toBe(200)
+            }
+        }
+    )
 
     it('serve index.html to default /', async () => {
         const app = new Elysia().use(staticPlugin())
@@ -571,7 +685,9 @@ describe('Static Plugin', () => {
         const second = await app.handle(request)
 
         expect(second.status).toBe(200)
-        expect(await second.blob().then((b) => b.text())).toBe(takodachi.toString())
+        expect(await second.blob().then((b) => b.text())).toBe(
+            takodachi.toString()
+        )
     })
 
     it('returns 304 for if-none-match after cached alwaysStatic route response', async () => {
@@ -616,7 +732,9 @@ describe('Static Plugin', () => {
         expect(second.status).toBe(200)
         expect(second.headers.get('content-type')).toContain('text/html')
         expect(second.headers.get('etag')).toBe(etag)
-        expect(second.headers.get('cache-control')).toBe('public, max-age=86400')
+        expect(second.headers.get('cache-control')).toBe(
+            'public, max-age=86400'
+        )
     })
 
     it('returns 304 for cached index.html default route', async () => {
@@ -653,20 +771,79 @@ describe('Static Plugin', () => {
         expect(second.headers.get('content-type')).toContain('image/png')
     })
 
-    it('suppresses etag and cache-control on cached file responses when etag is false', async () => {
-        const app = new Elysia().use(staticPlugin({ etag: false }))
+    it.each([
+        { bunFullstack: true, alwaysStatic: true },
+        { bunFullstack: false, alwaysStatic: true },
+        { bunFullstack: true, alwaysStatic: false },
+        { bunFullstack: false, alwaysStatic: false }
+    ])(
+        'suppresses etag and cache-control on cached file responses when etag is false',
+        async ({ bunFullstack, alwaysStatic }) => {
+            const app = new Elysia().use(
+                staticPlugin({ etag: false, alwaysStatic, bunFullstack })
+            )
 
-        await app.modules
+            await app.modules
 
-        const first = await app.handle(req('/public/takodachi.png'))
-        expect(first.status).toBe(200)
-        expect(first.headers.get('etag')).toBeNull()
-        expect(first.headers.get('cache-control')).toBeNull()
+            const first = await app.handle(req('/public/takodachi.png'))
+            expect(first.status).toBe(200)
+            expect(first.headers.get('etag')).toBeNull()
+            expect(first.headers.get('cache-control')).toBeNull()
 
-        const second = await app.handle(req('/public/takodachi.png'))
-        expect(second.status).toBe(200)
-        expect(second.headers.get('etag')).toBeNull()
-        expect(second.headers.get('cache-control')).toBeNull()
+            const second = await app.handle(req('/public/takodachi.png'))
+            expect(second.status).toBe(200)
+            expect(second.headers.get('etag')).toBeNull()
+            expect(second.headers.get('cache-control')).toBeNull()
+        }
+    )
+    describe.each([
+        { bunFullstack: true, alwaysStatic: true },
+        { bunFullstack: false, alwaysStatic: true },
+        { bunFullstack: true, alwaysStatic: false },
+        { bunFullstack: false, alwaysStatic: false }
+    ])('', ({ bunFullstack, alwaysStatic }) => {
+        let prevRouteCount = 0 // should expect to be non-decreasing as staticLimit increases
+        it.each([...Array(20)].map((_, i) => i))(
+            'test static limit',
+            async (staticLimit) => {
+                const app = new Elysia().use(
+                    staticPlugin({
+                        assets: 'public',
+                        prefix: '',
+                        indexHTML: true,
+                        bunFullstack,
+                        alwaysStatic,
+                        staticLimit
+                    })
+                )
+
+                await app.modules
+                const allPaths = [
+                    '/html',
+                    '/html/',
+                    '/html/index.html',
+                    '/html/index.html/',
+                    '/html/a.html/',
+                    '/js/index.js',
+                    '/takodachi.png',
+                    '/takodachi.png/',
+                    '/nested/takodachi.png',
+                    '\\nested\\takodachi.png'
+                ]
+                // console.log(staticLimit, app.routes.length)
+                expect(app.routes.length).toBeGreaterThanOrEqual(
+                    prevRouteCount - 1
+                ) // you may end up with a decrease of 1 when the last static route gets mounted and the two catch-all routes are no-longer needed. Bit scuffed test.
+                prevRouteCount = app.routes.length
+                for (const path of allPaths) {
+                    const res = await app.handle(req(path))
+                    expect(res.status).toBe(200)
+                }
+                for (const nonExistentPath of ['/', 'hi/ok', 'owo', '///']) {
+                    const res = await app.handle(req(nonExistentPath))
+                    expect(res.status).toBe(404)
+                }
+            }
+        )
     })
-
 })

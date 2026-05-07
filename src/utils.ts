@@ -1,6 +1,6 @@
 import type { BunFile } from 'bun'
-import type { ReadStream, Stats } from 'fs'
-import { ElysiaFile, file } from 'elysia'
+import { ElysiaFile, file as getElysiaFile } from 'elysia'
+import { ReadStream, Stats } from 'fs'
 
 let fs: typeof import('fs/promises')
 let path: typeof import('path')
@@ -22,23 +22,6 @@ export function getBuiltinModule() {
 
     return [fs, path] as const
 }
-
-export async function listHTMLFiles(dir: string) {
-    if (!fs) getBuiltinModule()
-
-    if (isBun) {
-        const glob = new Bun.Glob('**/*.html')
-        const files = []
-
-        for await (const file of glob.scan(dir))
-            files.push(path.join(dir, file))
-
-        return files
-    }
-
-    return []
-}
-
 export async function listFiles(dir: string): Promise<string[]> {
     if (!fs) getBuiltinModule()
 
@@ -81,6 +64,11 @@ export function fileExists(path: string) {
         (data) => !data.isDirectory(),
         () => false
     )
+}
+export function getFileStats(path: string) {
+    if (!fs) getBuiltinModule()
+
+    return fs.stat(path).catch(() => null)
 }
 
 export class LRUCache<K, V> {
@@ -140,11 +128,18 @@ export class LRUCache<K, V> {
         if (this.interval) clearInterval(this.interval)
     }
 }
-
-export function isCached(
+export function streamToString(stream: ReadStream) {
+    const chunks: Buffer<ArrayBuffer>[] = []
+    return new Promise<string>((resolve, reject) => {
+        stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+        stream.on('error', (err) => reject(err))
+        stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    })
+}
+export function alreadyCachedDownstream(
     headers: Record<string, string | undefined>,
-    etag: string,
-    filePath: string
+    etag: string | undefined,
+    fileStats: Stats
 ) {
     // Always return stale when Cache-Control: no-cache
     // to support end-to-end reload requests
@@ -182,13 +177,10 @@ export function isCached(
         const ifModifiedSince = headers['if-modified-since']
 
         try {
-            return fs.stat(filePath).then((stat) => {
-                if (
-                    stat.mtime !== undefined &&
-                    stat.mtime.getTime() <= Date.parse(ifModifiedSince)
-                )
-                    return true
-            })
+            return (
+                fileStats.mtime !== undefined &&
+                fileStats.mtime.getTime() <= Date.parse(ifModifiedSince)
+            )
         } catch {}
     }
 
@@ -198,7 +190,7 @@ export function isCached(
 let Crypto: typeof import('crypto')
 
 export function getFile(path: string) {
-    return file(path)
+    return getElysiaFile(path)
 }
 
 export async function generateETag(file: ElysiaFile) {

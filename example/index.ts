@@ -1,16 +1,27 @@
-import { Elysia } from 'elysia'
+import { Elysia, file } from 'elysia'
 import { staticPlugin } from '../src/index'
 import { node } from '@elysiajs/node'
-const app = new Elysia({ adapter: node() })
-    .use(
-        await staticPlugin({
-            prefix: '/',
-            assets: 'public',
-            bunFullstack: false
+import { isBun } from '../src/utils'
+import { req } from '../test/utils'
+;(async () => {
+    const app = new Elysia(isBun ? {} : { adapter: node() })
+        .onError(() => {})
+        .get('/*', () => {
+            // if (Math.random() < 0.3) return 'hi'
+            return file('nonexistent')
         })
-    )
-    .listen(3000)
-
-console.log(app.routes)
-
-await app.modules
+        // .use(
+        //     staticPlugin({
+        //         prefix: '/public',
+        //         assets: 'public/html',
+        //         alwaysStatic: false,
+        //         bunFullstack: false
+        //         // staticLimit: 1
+        //     })
+        // )
+        .listen(3001)
+    await app.modules
+    // const res = await app.handle(new Request(`http://localhost`))
+    // console.log(res.status)
+    console.log(app.routes)
+})() // no top-level awaits allowed for cjs (error triggered by `bun dev:node`) (idk how to fix this)

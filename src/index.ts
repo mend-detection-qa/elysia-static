@@ -8,11 +8,21 @@ import {
     getBuiltinModule,
     listFiles,
     generateETag,
-    isCached,
+    alreadyCachedDownstream,
     getFile,
-    isBun
+    isBun,
+    streamToString,
+    getFileStats
 } from './utils'
 import type { StaticOptions } from './types'
+import { BunFile, HTMLBundle } from 'bun'
+import { ReadStream, Stats } from 'fs'
+
+interface CachedFile {
+    data: Blob
+    stats: Stats
+    etag?: string
+}
 
 export async function staticPlugin<const Prefix extends string = '/prefix'>({
     assets = 'public',
@@ -53,33 +63,166 @@ export async function staticPlugin<const Prefix extends string = '/prefix'>({
         ? (p: string) => p.replace(/\\/g, '/')
         : (p: string) => p
 
-    const fileCache = new LRUCache<string, ElysiaFile>()
+    const fileCache = new LRUCache<string, CachedFile>()
 
-    if (prefix === path.sep) prefix = '' as Prefix
+    if (prefix.endsWith(path.sep)) {
+        prefix = prefix.slice(0, -1) as Prefix
+    }
+
     const assetsDir = path.resolve(assets)
+
     const shouldIgnore = !ignorePatterns.length
         ? () => false
-        : (file: string) =>
-              ignorePatterns.find((pattern) =>
+        : (relativeFilePathFromAssetDir: string) => {
+              return ignorePatterns?.find((pattern) =>
                   typeof pattern === 'string'
-                      ? pattern.includes(file)
-                      : pattern.test(file)
+                      ? pattern.includes(relativeFilePathFromAssetDir)
+                      : pattern.test(relativeFilePathFromAssetDir)
               )
+          }
 
-    /**
-     *
-     * Serves `preBundledFile` always, if this argument is passed in
-     */
-    async function getFileResponse({
-        relativeFilePath,
-        requestHeaders,
-        set,
-        preBundledFile
+    const app = new Elysia({
+        name: 'static',
+        seed: prefix
+    })
+    app.onError(() => {})
+    const files = (await listFiles(path.resolve(assets))).sort(
+        (path1, path2) => {
+            const isHTML1 = path1.endsWith('.html')
+            const isHTML2 = path2.endsWith('.html')
+            return +isHTML2 - +isHTML1
+        }
+    ) // prioritize mounting the html files first, since those must be added (if bunFullstack is true) whether or not we've exceeded staticLimit
+    let staticRoutesMounted = 0
+    /** whether or not the `prefix` url (no trailing slash, unless the whole url is `/`) was mounted in the below for-loop */
+    let rootPathAlreadyMounted = false
+    // mount applicable files (HTML files bundled with Bun, or all files if alwaysStatic is true) as static routes
+    for (const absoluteFilePath of files) {
+        const shouldBundleFileWithBun =
+            isBun && bunFullstack && absoluteFilePath.endsWith('.html')
+
+        if (staticRoutesMounted >= staticLimit && !shouldBundleFileWithBun) {
+            // we're skipping this asset, so we'll need the wildcard route generated when alwaysStatic is false
+            alwaysStatic = false // we can't mount any more (non-bun HTML) routes
+        }
+        if (
+            !absoluteFilePath ||
+            shouldIgnore(absoluteFilePath.replace(assetsDir, '')) ||
+            (!alwaysStatic && !shouldBundleFileWithBun) // if shouldBundleFileWithBun, we pre-bundle the HTML files and add them as routes regardless if alwaysStatic is true or not (matches current implementation)
+        )
+            continue
+
+        if (!(await fileExists(absoluteFilePath))) {
+            if (!silent)
+                console.warn(
+                    `[@elysiajs/static] Failed to load file: ${absoluteFilePath}`
+                )
+
+            return new Elysia()
+        }
+        const urlPath = getURLPath(absoluteFilePath)
+        const prebundledHTML = shouldBundleFileWithBun
+            ? ((await import(absoluteFilePath)).default as HTMLBundle)
+            : !useETag
+              ? getFile(absoluteFilePath)
+              : undefined
+
+        mountRoute({ urlPath, absoluteFilePath, prebundledHTML })
+        staticRoutesMounted++
+
+        if (indexHTML && urlPath.endsWith('/index.html')) {
+            const strippedURLPath = urlPath.replace(/\/index.html$/, '')
+            mountRoute({
+                urlPath: strippedURLPath === '' ? '/' : strippedURLPath,
+                absoluteFilePath,
+                prebundledHTML
+            })
+            staticRoutesMounted++
+
+            if (strippedURLPath === prefix) {
+                rootPathAlreadyMounted = true
+            }
+        }
+    }
+
+    // set up catch-all route for static assets
+    if (
+        // @ts-ignore private property
+        !(`GET_${prefix}/*` in app.routeTree) &&
+        !alwaysStatic
+    ) {
+        mountRoute({
+            urlPath: `${prefix.endsWith('/') ? prefix.slice(0, -1) : prefix}/*`,
+            absoluteFilePath: (params) =>
+                normalizePath(
+                    path.resolve(
+                        assets,
+                        decodeURI
+                            ? (fastDecodeURI(params['*']) ?? params['*'])
+                            : params['*']
+                    )
+                )
+        })
+        if (!rootPathAlreadyMounted) {
+            mountRoute({
+                urlPath: prefix === '' ? '/' : prefix,
+                absoluteFilePath: assetsDir
+            }) // /public/* does not catch /public (without the trailing /), so we need another route here in case it serves the top-level index.html file (funnily enough, /* captures /, so we are a bit redundant in that case)
+        }
+    }
+
+    function mountRoute({
+        urlPath,
+        absoluteFilePath,
+        prebundledHTML
     }: {
-        relativeFilePath: string
+        urlPath: string
+        absoluteFilePath: string | ((params: any) => string)
+        /** if provided, will serve bun HTML file instead of custom handler */
+        prebundledHTML?: HTMLBundle | ElysiaFile
+    }) {
+        app.get(
+            urlPath,
+            prebundledHTML !== undefined
+                ? prebundledHTML
+                : ({ params, headers: requestHeaders, set }) => {
+                      return getFileResponse({
+                          absoluteFilePath:
+                              typeof absoluteFilePath === 'function'
+                                  ? absoluteFilePath(params)
+                                  : absoluteFilePath,
+                          requestHeaders,
+                          set
+                      })
+                  },
+            {
+                detail: typeof detail === 'function' ? detail(urlPath) : detail
+            }
+        )
+    }
+    /** Replaces assetsDir with url prefix */
+    function getURLPath(absoluteFilePath: string) {
+        let relativeFilePath = absoluteFilePath.replace(assetsDir, '')
+        if (decodeURI)
+            relativeFilePath =
+                fastDecodeURI(relativeFilePath) ?? relativeFilePath
+
+        let urlPath = normalizePath(path.join(prefix, relativeFilePath))
+
+        if (!extension)
+            urlPath = normalizePath(urlPath.slice(0, urlPath.lastIndexOf('.')))
+        return urlPath
+    }
+
+    /** returns file response given file path and request headers */
+    async function getFileResponse({
+        absoluteFilePath,
+        requestHeaders,
+        set
+    }: {
+        absoluteFilePath: string
         requestHeaders: Record<string, string | undefined>
         set: Context['set']
-        preBundledFile?: ElysiaFile
     }) {
         const setInitialHeaders = () => {
             for (const [headerName, headerVal] of Object.entries(
@@ -89,188 +232,81 @@ export async function staticPlugin<const Prefix extends string = '/prefix'>({
             }
         }
 
-        const finalizeFileResponse = async (
-            file: ElysiaFile,
-            filePath: string
-        ) => {
+        const finalizeResponse = async (file: CachedFile) => {
             setInitialHeaders()
+            if (!useETag) return file.data
 
-            if (!useETag) return file
-
-            const etag = await generateETag(file)
-
-            if (etag && (await isCached(requestHeaders, etag, filePath)))
+            if (alreadyCachedDownstream(requestHeaders, file.etag, file.stats))
                 return new Response(null, {
                     status: 304
                 })
 
-            set.headers['etag'] = etag
+            set.headers['etag'] = file.etag
             set.headers['cache-control'] = maxAge
                 ? `${directive}, max-age=${maxAge}`
                 : directive
 
-            return file
+            return file.data
         }
 
-        if (shouldIgnore(relativeFilePath)) throw new NotFoundError()
+        const cachedFile =
+            fileCache.get(absoluteFilePath) ??
+            (indexHTML
+                ? fileCache.get(path.join(absoluteFilePath, 'index.html')) // eagerly check for /index.html subpath, regardless of whether absoluteFilePath is a directory or not
+                : undefined)
 
-        const cachedFile = preBundledFile ?? fileCache.get(relativeFilePath)
-        if (cachedFile)
-            return finalizeFileResponse(cachedFile, relativeFilePath)
+        if (cachedFile) {
+            return finalizeResponse(cachedFile)
+        }
 
+        let fileStat = await getFileStats(absoluteFilePath)
+        if (!fileStat) throw new NotFoundError()
+
+        if (fileStat.isDirectory()) {
+            if (indexHTML) {
+                absoluteFilePath = path.join(absoluteFilePath, 'index.html')
+                fileStat = await getFileStats(absoluteFilePath)
+            } else {
+                throw new NotFoundError()
+            }
+        }
+
+        if (shouldIgnore(absoluteFilePath.replace(assetsDir, '')))
+            throw new NotFoundError()
+
+        if (fileStat === null || fileStat.isDirectory()) {
+            throw new NotFoundError()
+        }
         try {
-            const fileStat = await fs.stat(relativeFilePath).catch(() => null)
-            if (!fileStat) throw new NotFoundError()
-
-            if (!indexHTML && fileStat.isDirectory()) throw new NotFoundError()
-
-            let file:
-                | NonNullable<Awaited<ReturnType<typeof getFile>>>
-                | undefined
-
-            let cacheKey = relativeFilePath
-
-            if (fileStat.isDirectory() && indexHTML) {
-                const htmlPath = path.join(relativeFilePath, 'index.html')
-                const cachedFile = fileCache.get(htmlPath)
-
-                if (cachedFile)
-                    return finalizeFileResponse(cachedFile, htmlPath)
-
-                if (await fileExists(htmlPath)) {
-                    cacheKey = htmlPath
-                    file = getFile(htmlPath)
+            if (absoluteFilePath.endsWith('.html') && isBun && bunFullstack) {
+                throw new Error(
+                    'Bun HTML files should be served directly as a static route, not requested dynamically'
+                )
+            } else {
+                const file = getFile(absoluteFilePath)
+                const cachedFileBlob: Blob = isBun
+                    ? new Blob([await (file.value as BunFile).text()], {
+                          // BunFiles are lazy by default, so we'll read out the content now instead of later (lest we get a 404 down the line)
+                          type: file.type
+                      })
+                    : new Blob(
+                          [await streamToString(file.value as ReadStream)],
+                          { type: file.type }
+                      )
+                const cachedFile: CachedFile = {
+                    data: cachedFileBlob,
+                    stats: fileStat,
+                    etag: await generateETag(file)
                 }
+                fileCache.set(absoluteFilePath, cachedFile)
+                return finalizeResponse(cachedFile)
             }
-
-            if (!fileStat.isDirectory()) {
-                file = getFile(relativeFilePath)
-            }
-            if (relativeFilePath.endsWith('.html') && isBun && bunFullstack) {
-                throw Error("File should've been pre-bundled!")
-            }
-
-            if (!file) throw new NotFoundError()
-
-            fileCache.set(cacheKey, file)
-
-            return finalizeFileResponse(file, cacheKey)
         } catch (error) {
             if (error instanceof NotFoundError) throw error
             if (!silent) console.error(`[@elysiajs/static]`, error)
 
             throw new NotFoundError()
         }
-    }
-
-    const app = new Elysia({
-        name: 'static',
-        seed: prefix
-    })
-
-    const files = await listFiles(path.resolve(assets))
-
-    if (files.length <= staticLimit)
-        // mount files as static routes
-        for (const absoluteFilePath of files) {
-            const shouldBundleFileWithBun =
-                isBun && bunFullstack && absoluteFilePath.endsWith('.html')
-            if (
-                !absoluteFilePath ||
-                shouldIgnore(absoluteFilePath) ||
-                (!alwaysStatic && !shouldBundleFileWithBun) // if shouldBundleFileWithBun, we pre-bundle the HTML files and add them as routes regardless if alwaysStatic is true or not (matches current implementation)
-            )
-                continue
-
-            let relativeFilePath = absoluteFilePath.replace(assetsDir, '')
-            if (decodeURI)
-                relativeFilePath =
-                    fastDecodeURI(relativeFilePath) ?? relativeFilePath
-
-            let urlPath = normalizePath(path.join(prefix, relativeFilePath))
-
-            if (!extension)
-                urlPath = normalizePath(
-                    urlPath.slice(0, urlPath.lastIndexOf('.'))
-                )
-
-            if (!(await fileExists(absoluteFilePath))) {
-                if (!silent)
-                    console.warn(
-                        `[@elysiajs/static] Failed to load file: ${absoluteFilePath}`
-                    )
-
-                return new Elysia()
-            }
-            const preBUNdledHTML: ElysiaFile | undefined =
-                shouldBundleFileWithBun
-                    ? (await import(absoluteFilePath)).default
-                    : undefined // pun intended
-
-            app.get(
-                urlPath,
-                ({ headers, set }) =>
-                    getFileResponse({
-                        relativeFilePath: absoluteFilePath,
-                        requestHeaders: headers,
-                        set,
-                        preBundledFile: preBUNdledHTML
-                    }),
-                {
-                    detail:
-                        typeof detail === 'function' ? detail(urlPath) : detail
-                }
-            )
-
-            if (indexHTML && urlPath.endsWith('/index.html'))
-                app.get(
-                    urlPath.replace('/index.html', ''),
-                    ({ headers, set }) =>
-                        getFileResponse({
-                            relativeFilePath: absoluteFilePath,
-                            requestHeaders: headers,
-                            set,
-                            preBundledFile: preBUNdledHTML
-                        }),
-                    {
-                        detail:
-                            typeof detail === 'function'
-                                ? detail(urlPath.replace('/index.html', ''))
-                                : detail
-                    }
-                )
-        }
-
-    // set up catch-all route for static assets
-    if (
-        // @ts-ignore private property
-        !(`GET_${prefix}/*` in app.routeTree) &&
-        !alwaysStatic
-    ) {
-        app.onError(() => {}).get(
-            `${prefix.endsWith('/') ? prefix.slice(0, -1) : prefix}/*`,
-            ({ params, headers: requestHeaders, set }) =>
-                getFileResponse({
-                    relativeFilePath: normalizePath(
-                        path.join(
-                            assets,
-                            decodeURI
-                                ? (fastDecodeURI(params['*']) ?? params['*'])
-                                : params['*']
-                        )
-                    ),
-                    requestHeaders,
-                    set
-                }),
-            {
-                detail:
-                    typeof detail === 'function'
-                        ? detail(
-                              `${prefix.endsWith('/') ? prefix.slice(0, -1) : prefix}/*`
-                          )
-                        : detail
-            }
-        )
     }
 
     return app
