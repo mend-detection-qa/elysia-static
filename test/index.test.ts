@@ -866,4 +866,18 @@ describe('Static Plugin', () => {
             expect((await res.bytes()).length).toBe(2)
         }
     )
+    it("doesn't allow path traversal attacks", async () => {
+        const app = new Elysia().use(
+            staticPlugin({
+                assets: 'public',
+                prefix: '',
+                decodeURI: true // does have to be set as true
+            })
+        )
+
+        await app.modules
+        const request = req('/..%2Fsrc/index.ts')
+        const res = await app.handle(request)
+        expect(res.status).toBe(404)
+    })
 })

@@ -10,13 +10,12 @@ import { req } from '../test/utils'
                 prefix: '',
                 assets: 'public',
                 alwaysStatic: false,
-                bunFullstack: true
+                bunFullstack: true,
+                decodeURI: false
                 // staticLimit: 1
             })
         )
         .listen(3001)
     await app.modules
-    // const res = await app.handle(new Request(`http://localhost`))
-    // console.log(res.status)
     console.log(app.routes)
 })() // no top-level awaits allowed for cjs (error triggered by `bun dev:node`) (idk how to fix this)

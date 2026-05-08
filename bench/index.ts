@@ -11,7 +11,7 @@ const app = new Elysia().use(
         prefix: 'public',
         indexHTML: true,
         bunFullstack: false,
-        alwaysStatic: false
+        alwaysStatic: true
     })
 )
 await app.modules

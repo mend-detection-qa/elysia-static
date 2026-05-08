@@ -153,8 +153,8 @@ export async function staticPlugin<const Prefix extends string = '/prefix'>({
     ) {
         mountRoute({
             urlPath: `${prefix.endsWith('/') ? prefix.slice(0, -1) : prefix}/*`,
-            absoluteFilePath: (params) =>
-                normalizePath(
+            absoluteFilePath: (params) => {
+                return normalizePath(
                     path.resolve(
                         assets,
                         decodeURI
@@ -162,6 +162,7 @@ export async function staticPlugin<const Prefix extends string = '/prefix'>({
                             : params['*']
                     )
                 )
+            }
         })
         if (!rootPathAlreadyMounted) {
             mountRoute({
@@ -224,6 +225,12 @@ export async function staticPlugin<const Prefix extends string = '/prefix'>({
         requestHeaders: Record<string, string | undefined>
         set: Context['set']
     }) {
+        if (
+            absoluteFilePath !== assetsDir &&
+            !absoluteFilePath.startsWith(assetsDir + path.sep)
+        )
+            throw new NotFoundError() // prevent file-traversal attacks
+
         const setInitialHeaders = () => {
             for (const [headerName, headerVal] of Object.entries(
                 initialHeaders ?? {}
