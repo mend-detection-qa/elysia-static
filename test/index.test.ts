@@ -2,7 +2,7 @@ import { Elysia } from 'elysia'
 import { staticPlugin } from '../src'
 
 import { expect, it, describe } from 'vitest'
-import { sep } from 'path'
+import { join, sep } from 'path'
 
 import { req, takodachi } from './utils'
 
@@ -152,7 +152,10 @@ describe('Static Plugin', () => {
         const app = new Elysia().use(
             staticPlugin({
                 alwaysStatic: true,
-                assets: 'public/'
+                assets: join(
+                    import.meta.dir ?? join(expect.getState().testPath!, '../'),
+                    '../public'
+                )
             })
         )
 
