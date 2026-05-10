@@ -64,7 +64,7 @@ export async function staticPlugin<const Prefix extends string = '/prefix'>({
 
     const fileCache = new LRUCache<string, CachedFile>()
 
-    if (prefix.endsWith(path.sep)) {
+    if (prefix.endsWith('/')) {
         prefix = prefix.slice(0, -1) as Prefix
     }
 
