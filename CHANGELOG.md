@@ -1,3 +1,7 @@
+# 1.4.11 - 11 May 2026
+Bug fix:
+- [#79](https://github.com/elysiajs/elysia-static/pull/79) return conte-type headers on non-bun runtimes
+
 # 1.4.10 - 24 Apr 2026
 Chore:
 - Publish under @elysia scope
